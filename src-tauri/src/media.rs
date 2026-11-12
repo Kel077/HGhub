@@ -257,9 +257,20 @@ mod tests {
     #[tokio::test]
     async fn live_play_chain() {
         use crate::net::edge;
-        let play = edge("GET", "/api/videos/117/play?ep=3&page_texts=0", None, None).await
-            .expect("play api");
-        let url = play["video_url"].as_str().expect("video_url").to_string();
+        use serde_json::json;
+        // 新链路：POST /api/videos/{id}/episodes/{ep}/playback
+        let play = edge(
+            "POST",
+            "/api/videos/117/episodes/3/playback",
+            Some(json!({})),
+            None,
+        )
+        .await
+        .expect("play api");
+        let url = play["streams"]["main"]
+            .as_str()
+            .expect("streams.main")
+            .to_string();
         println!("play url: {}", &url[..url.len().min(90)]);
         let (_, bytes) = fetch_bytes(&url).await.expect("fetch playlist");
         let text = String::from_utf8_lossy(&bytes);

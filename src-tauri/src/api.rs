@@ -31,6 +31,11 @@ impl Api {
             .ok_or_else(|| "请先登录".to_string())?;
         edge(method, path, body, Some(&token)).await
     }
+
+    async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+        let token = self.token();
+        edge("POST", path, Some(body), token.as_deref()).await
+    }
 }
 
 /// 诊断用：把前端自检结果写到应用数据目录 debug.log
@@ -178,7 +183,29 @@ pub async fn api_posts(state: State<'_, Api>, page: u32, size: u32) -> Result<Va
 
 #[tauri::command]
 pub async fn api_post(state: State<'_, Api>, id: i64) -> Result<Value, String> {
-    state.get(&format!("/api/posts/{id}")).await
+    let mut detail = state.get(&format!("/api/posts/{id}")).await?;
+    let has_url = detail
+        .get("video_url")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_url {
+        // 新链路：帖子播放地址走 /api/posts/{id}/playback
+        if let Ok(pb) = state.post(&format!("/api/posts/{id}/playback"), json!({})).await {
+            if let Some(url) = pb
+                .get("videos")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.get("url"))
+                .and_then(|u| u.as_str())
+            {
+                if !url.is_empty() {
+                    detail["video_url"] = json!(url);
+                }
+            }
+        }
+    }
+    Ok(detail)
 }
 
 /* ───────────────────────── 详情 / 播放 ───────────────────────── */
@@ -190,9 +217,41 @@ pub async fn api_video(state: State<'_, Api>, id: i64) -> Result<Value, String> 
 
 #[tauri::command]
 pub async fn api_play(state: State<'_, Api>, id: i64, ep: u32) -> Result<Value, String> {
-    state
-        .get(&format!("/api/videos/{id}/play?ep={ep}&page_texts=0"))
-        .await
+    // 站点已下线旧口 /api/videos/{id}/play（返回空 video_url），
+    // 新链路见官网 services/playback.js：POST /api/videos/{id}/episodes/{ep}/playback
+    let path = format!("/api/videos/{id}/episodes/{ep}/playback");
+    let data = state.post(&path, json!({})).await?;
+    let streams = data.get("streams");
+    let main = streams
+        .and_then(|s| s.get("main"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if main.is_empty() {
+        return Err("暂无播放地址".to_string());
+    }
+    let hevc = streams
+        .and_then(|s| s.get("hevc"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let duration = data.get("duration").and_then(|v| v.as_i64()).unwrap_or(0);
+    let title = data
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(json!({
+        "id": id,
+        "ep_num": data.get("ep").and_then(|v| v.as_i64()).unwrap_or(ep as i64),
+        "duration": duration,
+        "title": title,
+        "video_url": main,
+        "video_url_hevc": hevc,
+        // 透传 cdn 给前端按需加 x-cdn-auth 头（m3u8 实测不加也能 200）
+        "cdn": data.get("cdn").cloned().unwrap_or(Value::Null),
+        "manifest_method": data.get("manifest_method").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 /* ───────────────────────── 评论 / 互动 ───────────────────────── */
